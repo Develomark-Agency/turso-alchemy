@@ -1,0 +1,31 @@
+{
+  "name": "turso-alchemy",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "bun test",
+    "typecheck": "tsc --noEmit",
+    "lint": "oxlint ."
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^2.5.13",
+    "@stylistic/eslint-plugin": "^5.10.0",
+    "@types/bun": "latest",
+    "oxlint": "^1.83.0"
+  },
+  "peerDependencies": {
+    "typescript": "^7",
+    "alchemy": ">=0.93.0 <2.0.0-0"
+  },
+  "exports": {
+    ".": {
+      "default": "./index.ts"
+    }
+  },
+  "dependencies": {
+    "@libsql/client": "^0.18.0",
+    "@tursodatabase/api": "^2.0.5",
+    "dax": "^0.50.0",
+    "get-port": "^7.2.0"
+  }
+}
