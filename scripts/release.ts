@@ -12,7 +12,7 @@ async function getVersions() {
 
 async function pack() {
   await $`bun run build`;
-  await $`bun pm pack`.quiet();
+  await $`bun pm pack --destination dist`.quiet();
   const p = `./dist/${packageJson.name}-${packageJson.version}.tgz`;
   const release = Bun.file(p);
 
