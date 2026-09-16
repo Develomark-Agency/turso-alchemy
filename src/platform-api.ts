@@ -1,6 +1,7 @@
 import {
   createClient,
-  type Database
+  type Database,
+  type LocationKeys
 } from "@tursodatabase/api";
 import { Secret } from "alchemy";
 
@@ -10,6 +11,28 @@ interface PlatformDatabase {
   Name: string,
   Group?: string
 }
+
+/**
+ * Literal Turso region codes (e.g. `"iad"`, `"lhr"`).
+ *
+ * Derived from the SDK's `LocationKeys` with the `[key: string]: string`
+ * index signature stripped — without stripping, `keyof LocationKeys`
+ * collapses to `string | number` and editors lose completions.
+ */
+export type TursoLocationCode = keyof {
+  [K in keyof LocationKeys as string extends K
+    ? never
+    : number extends K
+      ? never
+      : K]: true
+};
+
+/**
+ * A Turso region code, `"closest"` for auto-detection, or any custom string.
+ * The `string & {}` tail keeps the type open while preserving literal
+ * completions in editors.
+ */
+export type GroupLocation = TursoLocationCode | "closest" | (string & {});
 
 export class TursoPlatformApi {
   private readonly client;
@@ -29,13 +52,61 @@ export class TursoPlatformApi {
     });
   }
 
-  async createDatabase(name: string, group: string) {
+  async createDatabase(
+    name: string,
+    group: string,
+    options?: { createGroup?: boolean, location?: GroupLocation }
+  ) {
+    if(options?.createGroup) {
+      await this.ensureGroup(group, options.location);
+    }
     try {
       const database = await this.client.databases.create(name, { group });
       return mapCreatedDatabase(database, group);
     } catch (error) {
       if(isStatus(error, 409)) return this.getDatabase(name);
       throw error;
+    }
+  }
+
+  async ensureGroup(name: string, location?: GroupLocation) {
+    try {
+      await this.client.groups.get(name);
+      return;
+    } catch (error) {
+      if(!isStatus(error, 404)) throw error;
+    }
+
+    const primaryLocation = await this.resolveLocation(location);
+    try {
+      await this.client.groups.create(name, primaryLocation);
+    } catch (error) {
+      if(isStatus(error, 409)) return;
+      if(isStatus(error, 402) || isStatus(error, 403)) {
+        throw new Error(
+          `Could not create Turso group ${JSON.stringify(name)}. Creating more than one group requires a Scaler, Pro, or Enterprise plan. Create the database in an existing group instead.`,
+          { cause: error }
+        );
+      }
+      throw error;
+    }
+  }
+
+  async resolveLocation(location?: GroupLocation): Promise<keyof LocationKeys> {
+    if(location && location !== "closest") {
+      return location as keyof LocationKeys;
+    }
+    try {
+      const closest = await this.client.locations.closest();
+      if(!closest?.server || typeof closest.server !== "string") {
+        throw new Error(`Unexpected closest-region response: ${JSON.stringify(closest)}`);
+      }
+      return closest.server;
+    } catch (error) {
+      throw new Error(
+        "Could not determine the closest Turso region. Pass an explicit group location, e.g. group: { createIfMissing: true, location: \"iad\" }.",
+        { cause: error }
+      );
     }
   }
 

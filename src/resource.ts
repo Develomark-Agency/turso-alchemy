@@ -12,8 +12,10 @@ import {
   startLocalLibsqlServer
 } from "./local";
 import { applyMigrations } from "./migrations";
-import { TursoPlatformApi } from "./platform-api";
+import { TursoPlatformApi, type GroupLocation } from "./platform-api";
 import { needsDatabaseReplacement } from "./replacement";
+
+export type { GroupLocation };
 
 export {
   type LocalLibsqlServer,
@@ -21,7 +23,7 @@ export {
   startLocalLibsqlServer
 } from "./local";
 
-type DevSettings =
+export type DevSettings =
   | {
     /**
      * Whether to use Turso Cloud instead of a local libSQL server.
@@ -38,6 +40,31 @@ type DevSettings =
     port?: number,
     /** Directory for local database files, relative to the project root. */
     dataDir?: string
+  };
+
+export type GroupOptions =
+  | {
+    /** Group name. Defaults to the previous group or `"default"`. */
+    name?: string,
+    /** Create the group when it is missing. */
+    createIfMissing: true,
+    /**
+     * Primary location used only when creating the group.
+     * A region code such as `"iad"` (with editor completions), a custom
+     * string, or `"closest"` (the default) to auto-detect the closest
+     * region like `turso group create` does.
+     */
+    location?: GroupLocation
+  }
+  | {
+    /** Group name. Defaults to the previous group or `"default"`. */
+    name?: string,
+    /**
+     * Do not create the group. The database create fails when it is missing.
+     * @default true (groups are auto-created unless this is explicitly false)
+     */
+    createIfMissing?: false,
+    location?: never
   };
 
 export interface TursoDatabaseProps {
@@ -59,8 +86,14 @@ export interface TursoDatabaseProps {
    */
   apiToken?: Secret<string>,
 
-  /** The Turso group that will own the database. It must already exist. */
-  group?: string,
+  /**
+   * The Turso group that will own the database.
+   *
+   * Pass a string as shorthand for the group name (auto-creates the group
+   * when missing). Pass an object to control provisioning explicitly.
+   * Changing the group name replaces a remote database.
+   */
+  group?: string | GroupOptions,
 
   /** A directory of numeric-prefix `.sql` migration files. */
   migrations?: string,
@@ -181,7 +214,8 @@ const _TursoDatabase = Resource(
     const name = this.phase === "delete"
       ? previous?.name ?? props.name ?? generatedName
       : props.name ?? previous?.name ?? generatedName;
-    const group = props.group ?? previous?.group ?? "default";
+    const resolvedGroup = resolveGroup(props.group, previous?.group);
+    const group = resolvedGroup.name;
     if(!/^[a-z0-9-]{1,64}$/.test(name)) {
       throw new Error("Turso database names must contain 1-64 lowercase letters, numbers, or dashes");
     }
@@ -213,7 +247,10 @@ const _TursoDatabase = Resource(
 
     const database = previous
       ? await api.getDatabase(name)
-      : await api.createDatabase(name, group);
+      : await api.createDatabase(name, group, {
+        createGroup: resolvedGroup.createIfMissing,
+        location: resolvedGroup.location
+      });
 
     const authToken = previous?.authToken ?? secret(
       await api.createDatabaseToken(name),
@@ -315,6 +352,23 @@ async function getLocalServer(
     }
   });
   return { server, dataDir };
+}
+
+function resolveGroup(
+  input: TursoDatabaseProps["group"],
+  previousGroup?: string
+): { name: string, createIfMissing: boolean, location?: GroupLocation } {
+  if(typeof input === "string") {
+    return { name: input, createIfMissing: true };
+  }
+  if(!input) {
+    return { name: previousGroup ?? "default", createIfMissing: true };
+  }
+  return {
+    name: input.name ?? previousGroup ?? "default",
+    createIfMissing: input.createIfMissing ?? true,
+    location: input.createIfMissing ? input.location : undefined
+  };
 }
 
 function resolveCredentials(props: TursoDatabaseProps): {

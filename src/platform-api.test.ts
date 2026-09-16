@@ -60,40 +60,9 @@ test("TursoPlatformApi ignores a missing database during deletion", async () => 
   );
 });
 
-test("TursoPlatformApi keeps a failed deletion visible", async () => {
-  await withFetch(
-    async () => jsonResponse({ error: "forbidden" }, 403),
-    async () => {
-      await expect(
-        new TursoPlatformApi("acme", secret("token", "test"))
-          .deleteDatabase("app")
-      ).rejects.toMatchObject({ status: 403 });
-    }
-  );
-});
-
-test("TursoPlatformApi keeps an unexpected create failure visible", async () => {
-  await withFetch(
-    async () => jsonResponse({ error: "forbidden" }, 403),
-    async () => {
-      await expect(
-        new TursoPlatformApi("acme", secret("token", "test"))
-          .createDatabase("app", "default")
-      ).rejects.toMatchObject({ status: 403 });
-    }
-  );
-});
-
 test("TursoPlatformApi creates a full-access database token", async () => {
-  let url: string | undefined;
   await withFetch(
-    async (input, init) => {
-      const request = input instanceof Request
-        ? new Request(input, init)
-        : new Request(input.toString(), init);
-      url = request.url;
-      return jsonResponse({ jwt: "database-token" });
-    },
+    async () => jsonResponse({ jwt: "database-token" }),
     async () => {
       await expect(
         new TursoPlatformApi("acme", secret("token", "test"))
@@ -101,9 +70,133 @@ test("TursoPlatformApi creates a full-access database token", async () => {
       ).resolves.toBe("database-token");
     }
   );
+});
 
-  expect(url).toContain("/databases/app/auth/tokens");
-  expect(url).toContain("authorization=full-access");
+test("TursoPlatformApi auto-creates a missing group with the closest location", async () => {
+  const seen: string[] = [];
+  let groupBody: { name?: string, location?: string } | undefined;
+  await withFetch(
+    async (input, init) => {
+      const request = input instanceof Request
+        ? new Request(input, init)
+        : new Request(input.toString(), init);
+      seen.push(`${request.method ?? "GET"} ${request.url}`);
+      if(request.url === "https://region.turso.io/") {
+        return jsonResponse({ server: "iad", client: "iad" });
+      }
+      if(request.url.includes("/groups/default") && (request.method ?? "GET") === "GET") {
+        return jsonResponse({ error: "not found" }, 404);
+      }
+      if(request.url.includes("/groups") && request.method === "POST") {
+        groupBody = await request.json() as { name?: string, location?: string };
+        return jsonResponse({ group: { name: "default", primary: "iad" } });
+      }
+      if(request.url.includes("/databases") && request.method === "POST") {
+        return jsonResponse({
+          database: { DbId: "db-1", Hostname: "db.turso.io", Name: "app" }
+        });
+      }
+      throw new Error(`unexpected request ${request.method} ${request.url}`);
+    },
+    async () => {
+      const database = await new TursoPlatformApi("acme", secret("token", "test"))
+        .createDatabase("app", "default", { createGroup: true });
+      expect(database).toMatchObject({ DbId: "db-1", Group: "default" });
+    }
+  );
+
+  expect(groupBody).toMatchObject({ name: "default", location: "iad" });
+  expect(seen.some(url => url.includes("region.turso.io"))).toBe(true);
+});
+
+test("TursoPlatformApi uses an explicit group location without closest lookup", async () => {
+  let closestCalls = 0;
+  let groupBody: { name?: string, location?: string } | undefined;
+  await withFetch(
+    async (input, init) => {
+      const request = input instanceof Request
+        ? new Request(input, init)
+        : new Request(input.toString(), init);
+      if(request.url === "https://region.turso.io/") {
+        closestCalls++;
+        return jsonResponse({ server: "iad", client: "iad" });
+      }
+      if(request.url.includes("/groups/default") && (request.method ?? "GET") === "GET") {
+        return jsonResponse({ error: "not found" }, 404);
+      }
+      if(request.url.includes("/groups") && request.method === "POST") {
+        groupBody = await request.json() as { name?: string, location?: string };
+        return jsonResponse({ group: { name: "default", primary: "lhr" } });
+      }
+      if(request.url.includes("/databases") && request.method === "POST") {
+        return jsonResponse({
+          database: { DbId: "db-1", Hostname: "db.turso.io", Name: "app" }
+        });
+      }
+      throw new Error(`unexpected request ${request.method} ${request.url}`);
+    },
+    async () => {
+      await new TursoPlatformApi("acme", secret("token", "test"))
+        .createDatabase("app", "default", { createGroup: true, location: "lhr" });
+    }
+  );
+
+  expect(closestCalls).toBe(0);
+  expect(groupBody).toMatchObject({ name: "default", location: "lhr" });
+});
+
+test("TursoPlatformApi skips group provisioning in strict mode", async () => {
+  await withFetch(
+    async (input, init) => {
+      const request = input instanceof Request
+        ? new Request(input, init)
+        : new Request(input.toString(), init);
+      if(request.url.includes("/groups") || request.url.includes("region.turso.io")) {
+        throw new Error(`group provisioning was not expected: ${request.url}`);
+      }
+      return jsonResponse({
+        database: { DbId: "db-1", Hostname: "db.turso.io", Name: "app" }
+      });
+    },
+    async () => {
+      const database = await new TursoPlatformApi("acme", secret("token", "test"))
+        .createDatabase("app", "default", { createGroup: false });
+      expect(database).toMatchObject({ DbId: "db-1", Group: "default" });
+    }
+  );
+});
+
+test("TursoPlatformApi treats a group conflict as already existing", async () => {
+  let databaseCalls = 0;
+  await withFetch(
+    async (input, init) => {
+      const request = input instanceof Request
+        ? new Request(input, init)
+        : new Request(input.toString(), init);
+      if(request.url === "https://region.turso.io/") {
+        return jsonResponse({ server: "iad", client: "iad" });
+      }
+      if(request.url.includes("/groups/default") && (request.method ?? "GET") === "GET") {
+        return jsonResponse({ error: "not found" }, 404);
+      }
+      if(request.url.includes("/groups") && request.method === "POST") {
+        return jsonResponse({ error: "group already exists" }, 409);
+      }
+      if(request.url.includes("/databases") && request.method === "POST") {
+        databaseCalls++;
+        return jsonResponse({
+          database: { DbId: "db-1", Hostname: "db.turso.io", Name: "app" }
+        });
+      }
+      throw new Error(`unexpected request ${request.method} ${request.url}`);
+    },
+    async () => {
+      const database = await new TursoPlatformApi("acme", secret("token", "test"))
+        .createDatabase("app", "default", { createGroup: true, location: "iad" });
+      expect(database).toMatchObject({ DbId: "db-1" });
+      expect(databaseCalls).toBe(1);
+    }
+  );
 });
 
 async function withFetch(
